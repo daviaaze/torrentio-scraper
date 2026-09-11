@@ -142,7 +142,18 @@ export async function upsertTorrent(torrentData) {
 
 // Insert a file record, returning the instance.
 export async function createFile(fileData) {
-  return File.create(fileData);
+  // Idempotent: pack fan-out re-syncs the same (hash, episode) repeatedly.
+  const where = {
+    infoHash: fileData.infoHash,
+    fileIndex: fileData.fileIndex ?? null,
+    imdbId: fileData.imdbId ?? null,
+    imdbSeason: fileData.imdbSeason ?? null,
+    imdbEpisode: fileData.imdbEpisode ?? null,
+    kitsuId: fileData.kitsuId ?? null,
+    kitsuEpisode: fileData.kitsuEpisode ?? null
+  };
+  const [instance] = await File.findOrCreate({ where, defaults: fileData });
+  return instance;
 }
 
 // Parse a human-readable size string (e.g. "3.19 GB", "500 MB") to bytes.
@@ -227,6 +238,29 @@ function findFileIndex(files, season, episode) {
     if (re.test(norm)) return Number(f.index) || 0;
   }
   return Math.max(0, ep - 1);
+}
+
+// Enumerate every (season, episode) present in a pack's file list, with each
+// episode's real fileIndex + size. Lets one season pack serve all its episodes
+// instead of being tagged with whichever single episode triggered the sync.
+function enumeratePackEpisodes(files) {
+  if (!files || !files.length) return [];
+  const out = [];
+  const seen = new Set();
+  for (const f of files) {
+    // Prober paths are char-encoded (S/0/2/E/0/1); strip / and . like findFileIndex.
+    const norm = String(f.path || f.name || '').replace(/[\/\.]/g, '');
+    const m = norm.match(/s0*(\d{1,2})e0*(\d{1,3})(?!\d)/i);
+    if (!m) continue;
+    const season = parseInt(m[1], 10);
+    const episode = parseInt(m[2], 10);
+    const key = `${season}:${episode}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ season, episode, fileIndex: Number(f.index) || 0,
+               size: f.size != null ? Number(f.size) : null });
+  }
+  return out;
 }
 
 // In-memory sync result cache (5 min TTL) to avoid re-syncing same content
@@ -437,10 +471,29 @@ export async function syncFromIndexer(imdbId, season, episode) {
     await Promise.all([...packTrackers].map(async ([h, tr]) => [h, await getPackFileList(h, tr)]))
   );
 
-  // Pass 3: assign fileIdx for packs and create file rows
+  // Pass 3: assign fileIdx for packs and create file rows.
+  // Season packs fan out to one row per episode they actually contain, so a
+  // pack discovered via S2E7 also answers S2E6, S2E8, ... (exact-match query).
   for (const r of fileRows) {
     if (r.isPack) {
-      r.fData.fileIndex = findFileIndex(packFileLists.get(r.fData.infoHash), r.fData.imdbSeason, r.fData.imdbEpisode);
+      const packFiles = packFileLists.get(r.fData.infoHash);
+      const eps = enumeratePackEpisodes(packFiles);
+      if (eps.length) {
+        for (const ep of eps) {
+          const efData = { ...r.fData, imdbSeason: ep.season, imdbEpisode: ep.episode,
+                           fileIndex: ep.fileIndex };
+          if (ep.size != null) efData.size = ep.size;
+          try {
+            const file = await createFile(efData);
+            results.push({ torrent: r.torr, file });
+          } catch (e) {
+            // Skip duplicates or constraint errors silently
+          }
+        }
+        continue;
+      }
+      // Unparseable file list: fall back to the single requested episode.
+      r.fData.fileIndex = findFileIndex(packFiles, r.fData.imdbSeason, r.fData.imdbEpisode);
     }
     try {
       const file = await createFile(r.fData);
