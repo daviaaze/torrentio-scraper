@@ -6,6 +6,8 @@ import { toStreamInfo, applyStaticInfo } from './lib/streamInfo.js';
 import * as repository from './lib/repository.js';
 import applySorting from './lib/sort.js';
 import applyFilters from './lib/filter.js';
+import { applyLiveScores } from './lib/liveScore.js';
+import { enrichSkipIntro } from './lib/introSkip.js';
 import { applyMochs, getMochCatalog, getMochItemMeta } from './moch/moch.js';
 import StaticLinks from './moch/static.js';
 import { createNamedQueue } from "./lib/namedQueue.js";
@@ -29,6 +31,8 @@ builder.defineStreamHandler((args) => {
   return requestQueue.wrap(args.id, () => resolveStreams(args))
       .then(streams => applyFilters(streams, args.extra))
       .then(streams => applySorting(streams, args.extra, args.type))
+      .then(streams => applyLiveScores(streams, args))
+      .then(streams => enrichSkipIntro(streams, args))
       .then(streams => applyStaticInfo(streams))
       .then(streams => applyMochs(streams, args.extra))
       .then(streams => enrichCacheParams(streams))
@@ -64,10 +68,18 @@ builder.defineMetaHandler((args) => {
 })
 
 async function resolveStreams(args) {
-  return cacheWrapStream(args.id, () => newLimiter(() => streamHandler(args)
-      .then(records => records
+  return cacheWrapStream(args.id, () => newLimiter(async () => {
+    const records = await streamHandler(args);
+    console.log(`resolveStreams: ${records.length} records from handler`);
+    if (records.length > 0) {
+      const streams = records
           .sort((a, b) => b.torrent.seeders - a.torrent.seeders || b.torrent.uploadDate - a.torrent.uploadDate)
-          .map(record => toStreamInfo(record)))));
+          .map(record => toStreamInfo(record));
+      console.log(`resolveStreams: ${streams.length} streams after mapping`);
+      return streams;
+    }
+    return [];
+  }));
 }
 
 async function streamHandler(args) {
@@ -86,7 +98,15 @@ async function seriesRecordsHandler(args) {
     const imdbId = parts[0];
     const season = parts[1] !== undefined ? parseInt(parts[1], 10) : 1;
     const episode = parts[2] !== undefined ? parseInt(parts[2], 10) : 1;
-    return repository.getImdbIdSeriesEntries(imdbId, season, episode);
+    const records = await repository.getImdbIdSeriesEntries(imdbId, season, episode);
+    if (records.length === 0) {
+      console.log(`DB miss for ${imdbId} S${season}E${episode} — querying torrent-indexer`);
+      await repository.syncFromIndexer(imdbId, season, episode);
+      const retry = await repository.getImdbIdSeriesEntries(imdbId, season, episode);
+      console.log(`sync retry: ${retry.length} results`);
+      return retry;
+    }
+    return records;
   } else if (args.id.match(/^kitsu:\d+(?::\d+)?$/i)) {
     const parts = args.id.split(':');
     const kitsuId = parts[1];
@@ -102,7 +122,13 @@ async function movieRecordsHandler(args) {
   if (args.id.match(/^tt\d+$/)) {
     const parts = args.id.split(':');
     const imdbId = parts[0];
-    return repository.getImdbIdMovieEntries(imdbId);
+    const records = await repository.getImdbIdMovieEntries(imdbId);
+    if (records.length === 0) {
+      console.log(`DB miss for ${imdbId} — querying torrent-indexer`);
+      await repository.syncFromIndexer(imdbId);
+      return repository.getImdbIdMovieEntries(imdbId);
+    }
+    return records;
   } else if (args.id.match(/^kitsu:\d+(?::\d+)?$/i)) {
     return seriesRecordsHandler(args);
   }
@@ -110,9 +136,15 @@ async function movieRecordsHandler(args) {
 }
 
 function enrichCacheParams(streams) {
+  const live = streams.find(stream => stream._live)?._live;
+  for (const stream of streams) delete stream._live;
   let cacheAge = CACHE_MAX_AGE;
   if (!streams.length) {
     cacheAge = CACHE_MAX_AGE_EMPTY;
+  } else if (live?.pending) {
+    cacheAge = 60;
+  } else if (live?.ranEmpty) {
+    cacheAge = 300;
   } else if (streams.every(stream => stream?.url?.endsWith(StaticLinks.FAILED_ACCESS))) {
     cacheAge = 0;
   }

@@ -36,7 +36,10 @@ export const Providers = {
       label: 'MagnetDL'
     },
     {
-      key: 'horriblesubs',
+      key: 'torrent-indexer',
+      label: 'Torrent Indexer'
+    },
+    {
       label: 'HorribleSubs',
       anime: true
     },
@@ -253,7 +256,11 @@ function filterByProvider(streams, config) {
     return streams;
   }
   return streams.filter(stream => {
-    const provider = extractProvider(stream.title).toLowerCase();
+    const provider = extractProvider(stream.title)?.toLowerCase();
+    // Unknown providers (e.g. from sync fallback) are passed through
+    if (!provider || !defaultProviderKeys.includes(provider)) {
+      return true;
+    }
     return providers.includes(provider);
   })
 }
