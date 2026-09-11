@@ -15,35 +15,6 @@ export async function getCinemetaTitle(imdbId) {
   }
 }
 
-// Search EZTV by IMDb ID
-export async function searchEZTV(imdbId) {
-  try {
-    const url = `https://eztv.re/api/get-torrents?imdb_id=${imdbId}&limit=50`;
-    const response = await fetch(url, { redirect: 'follow' });
-    if (!response.ok) return [];
-    const data = await response.json();
-    const torrents = data.torrents || [];
-    // EZTV returns imdb_id="0" when the series isn't found, or a different
-    // imdb_id when the match is fuzzy. Filter to only exact matches to avoid
-    // polluting the database with wrong entries.
-    return torrents
-        .filter(d => d.imdb_id && d.imdb_id !== '0' && d.imdb_id === imdbId)
-        .map(d => ({
-      info_hash: d.hash,
-      title: d.title,
-      original_title: d.title,
-      seed_count: d.seeds || 0,
-      size: d.size_bytes ? `${d.size_bytes} B` : '',
-      date: d.date_released_unix ? new Date(d.date_released_unix * 1000).toISOString() : new Date().toISOString(),
-      trackers: extractTrackersFromMagnet(d.magnet_url),
-      audio: [], // EZTV doesn't provide audio info
-      source: 'eztv'
-    }));
-  } catch (e) {
-    return [];
-  }
-}
-
 // Search torrent-indexer by text query
 // Optimization: query only the top 3 fastest indexers (bludv, comando_torrents, filme_torrent)
 // that return the most results — the other 4 are mirrors with heavy overlap
@@ -78,19 +49,6 @@ export async function searchTorrentIndexerByText(query, limit = 20) {
 // Search torrent-indexer by IMDb ID (original behavior)
 export async function searchTorrentIndexerByImdb(imdbId, limit = 20) {
   return searchTorrentIndexerByText(imdbId, limit);
-}
-
-// Search Nyaa for anime content
-export async function searchNyaa(query) {
-  try {
-    const url = `https://nyaa.si/?q=${encodeURIComponent(query)}&cat=1_2&s=seeders&o=desc`;
-    const response = await fetch(url);
-    if (!response.ok) return [];
-    const html = await response.text();
-    return parseNyaaResults(html);
-  } catch (e) {
-    return [];
-  }
 }
 
 // Search Prowlarr Torznab
@@ -170,50 +128,9 @@ export async function searchProwlarr(title, season, episode) {
   }
 }
 
-// Extract trackers from a magnet URL
-function extractTrackersFromMagnet(magnetUrl) {
-  if (!magnetUrl) return [];
-  const trackers = [];
-  const regex = /tr=([^&]+)/g;
-  let match;
-  while ((match = regex.exec(magnetUrl)) !== null) {
-    try {
-      trackers.push(decodeURIComponent(match[1]));
-    } catch (e) {}
-  }
-  return trackers;
-}
-
-// Parse Nyaa HTML results
-function parseNyaaResults(html) {
-  const results = [];
-  // Simple regex parsing for Nyaa results
-  const rowRegex = /<td colspan="2"><a href="\/view\/(\d+)" title="([^"]+)"/g;
-  const seedRegex = /<td class="text-center">(\d+)<\/td>/g;
-  const rows = [...html.matchAll(rowRegex)];
-  const seeds = [...html.matchAll(seedRegex)];
-  for (let i = 0; i < rows.length; i++) {
-    const title = rows[i][2];
-    const seeds_count = parseInt(seeds[i]?.[1] || '0');
-    // Extract infohash from view URL (Nyaa doesn't show hash in listing)
-    results.push({
-      info_hash: '', // Would need to fetch individual page
-      title,
-      original_title: title,
-      seed_count: seeds_count,
-      size: '',
-      date: new Date().toISOString(),
-      trackers: ['udp://tracker.coppersurfer.tk:6969/announce', 'udp://9.rarbg.to:2710/announce', 'udp://tracker.opentrackr.org:1337/announce'],
-      audio: [],
-      source: 'nyaa'
-    });
-  }
-  return results;
-}
-
 // Merge and dedupe results from multiple sources
 // Priority: prefer items with more seeders, then by source priority
-export function mergeResults(itemsBySource, preferredSources = ['torrent-indexer', 'eztv', 'prowlarr', 'nyaa']) {
+export function mergeResults(itemsBySource, preferredSources = ['torrent-indexer', 'prowlarr']) {
   const allItems = [];
   for (const [source, items] of Object.entries(itemsBySource)) {
     for (const item of items) {

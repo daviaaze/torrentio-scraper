@@ -40,6 +40,7 @@ export const Providers = {
       label: 'Torrent Indexer'
     },
     {
+      key: 'horriblesubs',
       label: 'HorribleSubs',
       anime: true
     },

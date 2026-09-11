@@ -6,7 +6,7 @@ import { Type } from './types.js';
 import { extractProvider } from "./titleHelper.js";
 import { Providers } from "./filter.js";
 
-const TRACKERS_URL = 'https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt';
+const TRACKERS_URL = process.env.TRACKERS_URL || 'https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt';
 const ANIME_TRACKERS = [
   "http://nyaa.tracker.wf:7777/announce",
   "http://anidex.moe:6969/announce",
@@ -42,7 +42,10 @@ export async function getMagnetLink(infoHash) {
   const torrentTrackers = torrent?.trackers?.split(',') || [];
   const animeTrackers = torrent?.type === Type.ANIME ? ALL_ANIME_TRACKERS : [];
   const providerTrackers = RUSSIAN_PROVIDERS.includes(torrent?.provider) && ALL_RUSSIAN_TRACKERS || [];
-  const trackers = unique([].concat(torrentTrackers).concat(animeTrackers).concat(providerTrackers));
+  // Always append the curated best public trackers so magnets find peers even
+  // when the index entry has stale/empty tracker lists (upstream only appends
+  // them for anime/RU providers).
+  const trackers = unique([].concat(torrentTrackers).concat(BEST_TRACKERS).concat(animeTrackers).concat(providerTrackers));
 
   return magnet.encode({ infoHash: infoHash, name: torrent?.title, announce: trackers });
 }
@@ -57,7 +60,7 @@ export async function initBestTrackers() {
 async function getBestTrackers(retry = 2) {
   const options = { timeout: 30000, headers: { 'User-Agent': getRandomUserAgent() } };
   return axios.get(TRACKERS_URL, options)
-      .then(response => response?.data?.trim()?.split('\n\n') || [])
+      .then(response => response?.data?.trim()?.split(/\r?\n+/) || [])
       .catch(error => {
         if (retry === 0) {
           console.log(`Failed retrieving best trackers: ${error.message}`);

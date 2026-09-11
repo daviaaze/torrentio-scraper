@@ -1,5 +1,5 @@
 import { Sequelize } from 'sequelize';
-import { getCinemetaTitle, searchEZTV, searchTorrentIndexerByImdb, searchTorrentIndexerByText, searchProwlarr, searchNyaa, mergeResults } from './syncSources.js';
+import { getCinemetaTitle, searchTorrentIndexerByImdb, searchTorrentIndexerByText, searchProwlarr, mergeResults } from './syncSources.js';
 const Op = Sequelize.Op;
 
 const DATABASE_URI = process.env.DATABASE_URI;
@@ -302,7 +302,7 @@ export async function syncFromIndexer(imdbId, season, episode) {
   console.log(`syncFromIndexer: ${allItems.length} items from IMDb search for ${imdbId}`);
 
   // Phase 2: If IMDb search finds nothing OR nothing matches the requested season,
-  // fall back to multi-source search (EZTV, text search, Prowlarr, Nyaa)
+  // fall back to multi-source search (text search + Prowlarr).
   const hasSeasonMatch = allItems.some(item => {
     const title = item.title || item.original_title || '';
     const extSeason = extractSeason(title);
@@ -316,23 +316,19 @@ export async function syncFromIndexer(imdbId, season, episode) {
     const title = await getCinemetaTitle(imdbId);
     console.log(`syncFromIndexer: Cinemeta title: ${title}`);
 
-    // Search all sources in parallel
-    const [textResults, eztvResults, prowlarrResults, nyaaResults] = await Promise.all([
+    // Search both sources in parallel
+    const [textResults, prowlarrResults] = await Promise.all([
       title ? searchTorrentIndexerByText(title, 20) : Promise.resolve([]),
-      searchEZTV(imdbId),
       title ? searchProwlarr(title, season, episode) : Promise.resolve([]),
-      title ? searchNyaa(title) : Promise.resolve([])
     ]);
 
-    console.log(`syncFromIndexer: multi-source results - text:${textResults.length} eztv:${eztvResults.length} prowlarr:${prowlarrResults.length} nyaa:${nyaaResults.length}`);
+    console.log(`syncFromIndexer: multi-source results - text:${textResults.length} prowlarr:${prowlarrResults.length}`);
 
     // Merge all results, dedupe by infohash
     const merged = mergeResults({
       'torrent-indexer': allItems,
       'torrent-indexer-text': textResults,
-      'eztv': eztvResults,
       'prowlarr': prowlarrResults,
-      'nyaa': nyaaResults.filter(d => d.info_hash) // Nyaa doesn't have hashes in listing
     });
 
     // Rebuild seen set with original items
